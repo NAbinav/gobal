@@ -9,26 +9,26 @@ import (
 )
 
 type RoundRobin struct {
-	items []string
-	index int
-	mu    sync.Mutex
+	proxies []*httputil.ReverseProxy
+	index   int
+	mu      sync.Mutex
 }
 
 func New(items []string) *RoundRobin {
-	return &RoundRobin{
-		items: items,
-		index: 0,
+	proxies := make([]*httputil.ReverseProxy, len(items))
+	for i, backend := range items {
+		target, _ := url.Parse(backend)
+		proxies[i] = httputil.NewSingleHostReverseProxy(target)
 	}
+	return &RoundRobin{proxies: proxies}
 }
 
-func (r *RoundRobin) Balance() string {
+func (r *RoundRobin) Balance() *httputil.ReverseProxy {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.items) == 0 {
-		return ""
-	}
-	r.index = (r.index + 1) % len(r.items)
-	return r.items[r.index]
+	proxy := r.proxies[r.index]
+	r.index = (r.index + 1) % len(r.proxies)
+	r.mu.Unlock()
+	return proxy
 }
 
 func main() {
@@ -43,8 +43,7 @@ func main() {
 	rr := New(backends)
 
 	http.ListenAndServe(*out, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target, _ := url.Parse(rr.Balance())
-		httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
+		rr.Balance().ServeHTTP(w, r)
 	}))
 
 }
