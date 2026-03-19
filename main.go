@@ -5,13 +5,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type RoundRobin struct {
 	proxies []*httputil.ReverseProxy
-	index   int
-	mu      sync.Mutex
+	counter uint64
 }
 
 func New(items []string) *RoundRobin {
@@ -24,11 +24,8 @@ func New(items []string) *RoundRobin {
 }
 
 func (r *RoundRobin) Balance() *httputil.ReverseProxy {
-	r.mu.Lock()
-	proxy := r.proxies[r.index]
-	r.index = (r.index + 1) % len(r.proxies)
-	r.mu.Unlock()
-	return proxy
+	n := atomic.AddUint64(&r.counter, 1)
+	return r.proxies[n%uint64(len(r.proxies))]
 }
 
 func main() {
@@ -41,9 +38,15 @@ func main() {
 	flag.Parse()
 
 	rr := New(backends)
-
-	http.ListenAndServe(*out, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rr.Balance().ServeHTTP(w, r)
-	}))
+	server := &http.Server{
+		Addr: *out,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rr.Balance().ServeHTTP(w, r)
+		}),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	server.ListenAndServe()
 
 }
