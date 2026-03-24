@@ -10,22 +10,28 @@ import (
 )
 
 type RoundRobin struct {
-	proxies []*httputil.ReverseProxy
-	counter uint64
+	backends []*url.URL
+	counter  uint64
 }
 
 func New(items []string) *RoundRobin {
-	proxies := make([]*httputil.ReverseProxy, len(items))
-	for i, backend := range items {
-		target, _ := url.Parse(backend)
-		proxies[i] = httputil.NewSingleHostReverseProxy(target)
+	var urls []*url.URL
+	for _, item := range items {
+		u, _ := url.Parse(item)
+		urls = append(urls, u)
 	}
-	return &RoundRobin{proxies: proxies}
+	return &RoundRobin{backends: urls}
 }
 
-func (r *RoundRobin) Balance() *httputil.ReverseProxy {
+func (r *RoundRobin) Balance() *url.URL {
 	n := atomic.AddUint64(&r.counter, 1)
-	return r.proxies[n%uint64(len(r.proxies))]
+	return r.backends[(n-1)%uint64(len(r.backends))]
+}
+
+var transport = &http.Transport{
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 100,
+	IdleConnTimeout:     90 * time.Second,
 }
 
 func main() {
@@ -37,16 +43,36 @@ func main() {
 	out := flag.String("out", ":8080", "listen address")
 	flag.Parse()
 
-	rr := New(backends)
-	server := &http.Server{
-		Addr: *out,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			rr.Balance().ServeHTTP(w, r)
-		}),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	if len(backends) == 0 {
+		panic("at least one backend is required")
 	}
-	server.ListenAndServe()
 
+	rr := New(backends)
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			target := rr.Balance()
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.URL.Path = target.Path + req.URL.Path
+			if target.RawQuery == "" || req.URL.RawQuery == "" {
+				req.URL.RawQuery = target.RawQuery + req.URL.RawQuery
+			} else {
+				req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
+			}
+			if _, ok := req.Header["User-Agent"]; !ok {
+				req.Header.Set("User-Agent", "")
+			}
+		},
+		Transport: transport,
+	}
+
+	server := &http.Server{
+		Addr:    *out,
+		Handler: proxy,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
+		panic(err)
+	}
 }
